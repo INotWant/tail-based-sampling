@@ -78,12 +78,14 @@ public class ReadDataRunnable implements Runnable {
                     pos += readNum;
                 }
 
-                String content = lastRemain;
+                String content = "";
                 if (pos != 0) {
                     content += new String(cache, 0, pos);
                 }
 
                 String[] splits = content.split("\n");
+                splits[0] = lastRemain + splits[0];
+
                 int splitsLen = splits.length;
                 int splitsAvailableLen;
 
@@ -98,7 +100,9 @@ public class ReadDataRunnable implements Runnable {
                 LOGGER.info("suc to read a cache, size: " + pos);
 
                 if (resultList.size() + splitsAvailableLen < 20000) {
-                    resultList.addAll(Arrays.asList(splits).subList(0, splitsAvailableLen));
+                    for (int i = 0; i < splitsAvailableLen; i++) {
+                        resultList.add(splits[i]);
+                    }
                 } else {
                     int j = 0;
                     for (int i = resultList.size(); i < 20000; i++) {
@@ -107,6 +111,7 @@ public class ReadDataRunnable implements Runnable {
                     this.synQueue.put(resultList);
                     LOGGER.info("suc to enqueue DATA_STR_QUEUE!");
                     resultList = new LinkedList<>();
+
                     while (j < splitsAvailableLen) {
                         resultList.add(splits[j++]);
                     }
@@ -118,7 +123,7 @@ public class ReadDataRunnable implements Runnable {
                         this.synQueue.put(resultList);
                     }
 
-                    this.synQueue.put(new ArrayList<>());
+                    this.synQueue.put(new LinkedList<>());
                     LOGGER.info("exit read data thread, data request completed");
                     return;
                 }

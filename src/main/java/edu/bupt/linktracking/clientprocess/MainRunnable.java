@@ -9,10 +9,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -25,8 +22,6 @@ import static edu.bupt.linktracking.Main.getDataSourcePort;
 import static edu.bupt.linktracking.Main.responseDataSourceReady;
 
 public class MainRunnable implements Runnable {
-    private static BlockingQueue<List<String>> SPAN_QUEUE = new LinkedBlockingQueue<>(8);
-
     private static List<Map<String, List<String>>> RING_CACHES = new ArrayList<>();
     private static Lock LOCK_FOR_RING_CACHES = new ReentrantLock();
     private static Condition CONDITION_FOR_RING_CACHES = LOCK_FOR_RING_CACHES.newCondition();
@@ -34,7 +29,7 @@ public class MainRunnable implements Runnable {
     private static BlockingQueue<Pair<Set<String>, Integer>> UPLOAD_QUEUE = new LinkedBlockingQueue<>();
 
     // size of the ring cache
-    private static int CACHE_TOTAL = 12;
+    private static int CACHE_TOTAL = 8;
 
     static {
         for (int i = 0; i < CACHE_TOTAL; i++) {
@@ -54,10 +49,12 @@ public class MainRunnable implements Runnable {
             final Logger LOGGER = LoggerFactory.getLogger(Thread.currentThread().getName());
 
             // start process data thread
-            ProcessDataRunnable processDataRunnable = new ProcessDataRunnable(SPAN_QUEUE, RING_CACHES, UPLOAD_QUEUE,
-                    LOCK_FOR_RING_CACHES, CONDITION_FOR_RING_CACHES);
-            Thread processDataThread = new Thread(processDataRunnable, "ProcessDataThread");
-            processDataThread.start();
+            ProcessDataRunnable processDataRunnable1 = new ProcessDataRunnable(RING_CACHES);
+            Thread processDataThread1 = new Thread(processDataRunnable1, "ProcessDataThread1");
+            processDataThread1.start();
+            ProcessDataRunnable processDataRunnable2 = new ProcessDataRunnable(RING_CACHES);
+            Thread processDataThread2 = new Thread(processDataRunnable2, "ProcessDataThread2");
+            processDataThread2.start();
 
             // start listen LISTEN_PORT (target: 1) communicate with data source; 2) communicate with backend for uploading span)
             serverSocket = new ServerSocket(Main.LISTEN_PORT);
@@ -65,9 +62,9 @@ public class MainRunnable implements Runnable {
             responseDataSourceReady(dataSourceSocket);
             dataSourceSocket = serverSocket.accept();
             Main.DATA_SOURCE_PORT = getDataSourcePort(dataSourceSocket);
-            if (Main.DATA_SOURCE_PORT == -1){
+            if (Main.DATA_SOURCE_PORT == -1) {
                 LOGGER.error("fail to get data source port");
-            }else {
+            } else {
                 LOGGER.error("suc to get data source port: " + Main.DATA_SOURCE_PORT);
             }
 
@@ -77,8 +74,8 @@ public class MainRunnable implements Runnable {
 
             // start read data thread (need DATA_SOURCE_PORT)
             String dataPath = getDataPath();
-            long rangeSize = 4 * Constants.MB_SIZE;
-            long rangeStep = 4 * Constants.MB_SIZE;
+            long rangeSize = 6 * Constants.MB_SIZE;
+            long rangeStep = 6 * Constants.MB_SIZE;
             long rangeValueStart = 0;
             ReadDataRunnable readDataRunnable1 = new ReadDataRunnable(dataPath, rangeSize, rangeStep, rangeValueStart);
             new Thread(readDataRunnable1, "ReadDataThread1").start();
@@ -90,17 +87,65 @@ public class MainRunnable implements Runnable {
 
             // bridge read thread & process thread
             SynchronousQueue<List<String>> queue1 = readDataRunnable1.getSynQueue();
+
+            SynchronousQueue<List<String>> spanSynQueue1 = processDataRunnable1.getSpanSynQueue();
+            SynchronousQueue<List<String>> spanSynQueue2 = processDataRunnable2.getSpanSynQueue();
+            SynchronousQueue<Set<String>> uploadSynQueue1 = processDataRunnable1.getUploadSynQueue();
+            SynchronousQueue<Set<String>> uploadSynQueue2 = processDataRunnable2.getUploadSynQueue();
+
+            Set<String> lastWrongTraceIds = null, currWrongTraceIds;
+            int batchPos = -1;
+            int cachePos = 0;
+            int ringCacheSize = RING_CACHES.size();
+
+            Map<String, List<String>> currCache = RING_CACHES.get(cachePos);
+
             while (true) {
                 List<String> dataBlockStr1 = queue1.take();
                 if (dataBlockStr1.size() > 0) {
-                    SPAN_QUEUE.put(dataBlockStr1);
+                    Pair<List<String>, List<String>> pair = splitList(dataBlockStr1);
+
+                    if (currCache.size() > 0) {
+                        long startTime = System.currentTimeMillis();
+                        LOGGER.warn("cache conflict!");
+                        LOCK_FOR_RING_CACHES.lock();
+                        try {
+                            while (currCache.size() > 0) {
+                                CONDITION_FOR_RING_CACHES.await();
+                            }
+                        } finally {
+                            LOCK_FOR_RING_CACHES.unlock();
+                        }
+                        long endTime = System.currentTimeMillis();
+                        LOGGER.info("suc to clear cache, waiting time: " + (endTime - startTime));
+                    }
+
+                    spanSynQueue1.put(pair.first);
+                    spanSynQueue2.put(pair.second);
+
+                    currWrongTraceIds = uploadSynQueue1.take();
+                    currWrongTraceIds.addAll(uploadSynQueue2.take());
+
+                    if (lastWrongTraceIds != null) {
+                        UPLOAD_QUEUE.put(new Pair<>(lastWrongTraceIds, batchPos));
+                    }
+
+                    lastWrongTraceIds = currWrongTraceIds;
+                    ++batchPos;
+                    cachePos = ++cachePos == ringCacheSize ? 0 : cachePos;
+                    currCache = RING_CACHES.get(cachePos);
                 } else {
-                    SPAN_QUEUE.put(new ArrayList<>());
+                    List<String> nullSpans = new LinkedList<>();
+                    spanSynQueue1.put(nullSpans);
+                    spanSynQueue2.put(nullSpans);
                     break;
                 }
             }
 
-            processDataThread.join();
+            if (lastWrongTraceIds != null) {
+                UPLOAD_QUEUE.put(new Pair<>(lastWrongTraceIds, batchPos));
+            }
+
             UPLOAD_QUEUE.put(new Pair<>(null, -1));
 
             LOGGER.info("exit main thread");
@@ -115,5 +160,19 @@ public class MainRunnable implements Runnable {
                 e.printStackTrace();
             }
         }
+    }
+
+    private static Pair<List<String>, List<String>> splitList(List<String> list) {
+        List<String> firstList = new LinkedList<>();
+        for (int i = 0; i < list.size() / 2; i++) {
+            firstList.add(list.get(i));
+        }
+
+        int i = 0;
+        int len = list.size() / 2;
+        while (i++ < len) {
+            list.remove(0);
+        }
+        return new Pair<>(firstList, list);
     }
 }
