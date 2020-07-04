@@ -27,17 +27,15 @@ public class ProcessDataRunnable implements Runnable {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public void run() {
         final Logger LOGGER = LoggerFactory.getLogger(Thread.currentThread().getName());
 
         int batchPos = -1;
         int cachePos = 0;
         int ringCacheSize = ringCaches.size();
-        Set[] wrongTraceIdsArr = new Set[]{new HashSet<String>(32), new HashSet<String>(32)};
-        int wrongTraceIdsIndex = 0, lastWrongTraceIdsIndex = 1;
+        Set<String> lastWrongTraceIds = null;
+        Set<String> currWrongTraceIds = new HashSet<>();
         Map<String, List<String>> currCache = ringCaches.get(cachePos);
-        String lastCacheBlockRemain = "";
 
         try {
             while (true) {
@@ -49,44 +47,31 @@ public class ProcessDataRunnable implements Runnable {
 
                 LOGGER.info("start to process data block, batchPos: " + batchPos);
 
-                for (int i = 0; i < spans.size(); i++) {
-                    String span = spans.get(i);
-                    if (i == 0) {
-                        span = lastCacheBlockRemain + span;
-                    } else if (i == spans.size() - 1) { // there is a certain probability of error
-                        lastCacheBlockRemain = span;
-                        continue;
-                    }
+                for (String span : spans) {
                     int indexF = span.indexOf('|');
                     int indexL = span.lastIndexOf('|');
                     if (indexF >= 0 && indexF != indexL) {
                         String traceId = span.substring(0, indexF);
 
-                        List<String> spanList = currCache.computeIfAbsent(traceId, k -> new ArrayList<>());
-
+                        List<String> spanList = currCache.computeIfAbsent(traceId, k -> new LinkedList<>());
                         spanList.add(span);
+
                         if (span.indexOf("error=1", indexL + 1) >= 0 ||
                                 (span.indexOf("http.status_code=", indexL + 1) >= 0 && span.indexOf("http.status_code=200", indexL + 1) == -1)) {
-                            if (!wrongTraceIdsArr[lastWrongTraceIdsIndex].contains(traceId)) {
-                                wrongTraceIdsArr[wrongTraceIdsIndex].add(traceId);
-                            } else {
-                                LOGGER.info("requested last time!");
-                            }
+                            currWrongTraceIds.add(traceId);
                         }
                     }
                 }
 
                 LOGGER.info("suc to process data block, batchPos: " + batchPos);
 
-                lastWrongTraceIdsIndex = 1 - wrongTraceIdsIndex;
-                Set<String> lastWrongTraceIdSet = wrongTraceIdsArr[lastWrongTraceIdsIndex];
                 if (batchPos >= 0) {
-                    uploadQueue.put(new Pair<>(new HashSet<>(lastWrongTraceIdSet), batchPos));
-                    lastWrongTraceIdSet.clear();
+                    uploadQueue.put(new Pair<>(lastWrongTraceIds, batchPos));
                 }
 
-                wrongTraceIdsIndex = 1 - wrongTraceIdsIndex;
-                lastWrongTraceIdsIndex = 1 - wrongTraceIdsIndex;
+                lastWrongTraceIds = currWrongTraceIds;
+                currWrongTraceIds = new HashSet<>();
+
                 ++batchPos;
 
                 cachePos = ++cachePos == ringCacheSize ? 0 : cachePos;
@@ -107,9 +92,8 @@ public class ProcessDataRunnable implements Runnable {
                 }
             }
             // because upload slow one
-            Set<String> lastWrongTraceIdSet = wrongTraceIdsArr[lastWrongTraceIdsIndex];
-            if (lastWrongTraceIdSet.size() > 0) {
-                uploadQueue.put(new Pair<>(lastWrongTraceIdSet, batchPos));
+            if (lastWrongTraceIds != null && lastWrongTraceIds.size() > 0) {
+                uploadQueue.put(new Pair<>(lastWrongTraceIds, batchPos));
             }
 
             LOGGER.info("exit process data thread");

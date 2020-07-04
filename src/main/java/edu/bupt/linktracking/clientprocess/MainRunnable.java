@@ -34,7 +34,7 @@ public class MainRunnable implements Runnable {
     private static BlockingQueue<Pair<Set<String>, Integer>> UPLOAD_QUEUE = new LinkedBlockingQueue<>();
 
     // size of the ring cache
-    private static int CACHE_TOTAL = 16;
+    private static int CACHE_TOTAL = 12;
 
     static {
         for (int i = 0; i < CACHE_TOTAL; i++) {

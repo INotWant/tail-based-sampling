@@ -7,10 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.SynchronousQueue;
 
 public class ReadDataRunnable implements Runnable {
@@ -50,10 +47,14 @@ public class ReadDataRunnable implements Runnable {
 
         int cacheSize = (int) rangeSize;
         byte[] cache = new byte[cacheSize];
+
+        List<String> resultList = new LinkedList<>();
+
         try {
             URL url = new URL(path);
 
             int pos, readNum;
+            String lastRemain = "";
 
             while (true) {
                 LOGGER.info("start to read");
@@ -77,17 +78,46 @@ public class ReadDataRunnable implements Runnable {
                     pos += readNum;
                 }
 
-                String content = "";
+                String content = lastRemain;
                 if (pos != 0) {
-                    content = new String(cache, 0, pos);
+                    content += new String(cache, 0, pos);
+                }
+
+                String[] splits = content.split("\n");
+                int splitsLen = splits.length;
+                int splitsAvailableLen;
+
+                if (content.charAt(content.length() - 1) != '\n') {
+                    lastRemain = splits[splitsLen - 1];
+                    splitsAvailableLen = splitsLen - 1;
+                } else {
+                    lastRemain = "";
+                    splitsAvailableLen = splitsLen;
                 }
 
                 LOGGER.info("suc to read a cache, size: " + pos);
-                this.synQueue.put(Arrays.asList(content.split("\n")));
-                LOGGER.info("suc to enqueue DATA_STR_QUEUE!");
+
+                if (resultList.size() + splitsAvailableLen < 20000) {
+                    resultList.addAll(Arrays.asList(splits).subList(0, splitsAvailableLen));
+                } else {
+                    int j = 0;
+                    for (int i = resultList.size(); i < 20000; i++) {
+                        resultList.add(splits[j++]);
+                    }
+                    this.synQueue.put(resultList);
+                    LOGGER.info("suc to enqueue DATA_STR_QUEUE!");
+                    resultList = new LinkedList<>();
+                    while (j < splitsAvailableLen) {
+                        resultList.add(splits[j++]);
+                    }
+                }
 
                 this.addRangeValueStart();
                 if (this.rangeValueStart >= this.dataSize) {
+                    if (resultList.size() > 0) {
+                        this.synQueue.put(resultList);
+                    }
+
                     this.synQueue.put(new ArrayList<>());
                     LOGGER.info("exit read data thread, data request completed");
                     return;
