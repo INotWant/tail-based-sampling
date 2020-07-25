@@ -19,13 +19,14 @@ public class ReadDataRunnable implements Runnable {
 
     private long dataSize;
 
-    private SynchronousQueue<List<String>> synQueue = new SynchronousQueue<>();
+    private final SynchronousQueue<String> dataBlockSynQueue;
 
-    public ReadDataRunnable(String path, long rangeSize, long rangeStep, long rangeValueStart) {
+    public ReadDataRunnable(String path, long rangeSize, long rangeStep, long rangeValueStart, SynchronousQueue<String> dataBlockSynQueue) {
         this.path = path;
         this.rangeSize = rangeSize;
         this.rangeStep = rangeStep;
         this.rangeValueStart = rangeValueStart;
+        this.dataBlockSynQueue = dataBlockSynQueue;
     }
 
     private String getRangeValue() {
@@ -36,10 +37,6 @@ public class ReadDataRunnable implements Runnable {
         this.rangeValueStart += rangeStep;
     }
 
-    public SynchronousQueue<List<String>> getSynQueue() {
-        return synQueue;
-    }
-
     @Override
     public void run() {
         final Logger LOGGER = LoggerFactory.getLogger(Thread.currentThread().getName());
@@ -48,13 +45,10 @@ public class ReadDataRunnable implements Runnable {
         int cacheSize = (int) rangeSize;
         byte[] cache = new byte[cacheSize];
 
-        List<String> resultList = new LinkedList<>();
-
         try {
             URL url = new URL(path);
 
             int pos, readNum;
-            String lastRemain = "";
 
             while (true) {
                 LOGGER.info("start to read");
@@ -78,52 +72,18 @@ public class ReadDataRunnable implements Runnable {
                     pos += readNum;
                 }
 
-                String content = "";
+                String dataBlock = "";
                 if (pos != 0) {
-                    content += new String(cache, 0, pos);
+                    dataBlock += new String(cache, 0, pos);
                 }
 
-                String[] splits = content.split("\n");
-                splits[0] = lastRemain + splits[0];
-
-                int splitsLen = splits.length;
-                int splitsAvailableLen;
-
-                if (content.charAt(content.length() - 1) != '\n') {
-                    lastRemain = splits[splitsLen - 1];
-                    splitsAvailableLen = splitsLen - 1;
-                } else {
-                    lastRemain = "";
-                    splitsAvailableLen = splitsLen;
-                }
-
-                LOGGER.info("suc to read a cache, size: " + pos);
-
-                if (resultList.size() + splitsAvailableLen < 20000) {
-                    for (int i = 0; i < splitsAvailableLen; i++) {
-                        resultList.add(splits[i]);
-                    }
-                } else {
-                    int j = 0;
-                    for (int i = resultList.size(); i < 20000; i++) {
-                        resultList.add(splits[j++]);
-                    }
-                    this.synQueue.put(resultList);
-                    LOGGER.info("suc to enqueue DATA_STR_QUEUE!");
-                    resultList = new LinkedList<>();
-
-                    while (j < splitsAvailableLen) {
-                        resultList.add(splits[j++]);
-                    }
-                }
+                LOGGER.info("suc to read a data block, size: " + pos);
+                dataBlockSynQueue.put(dataBlock);
+                LOGGER.info("suc to put a data block");
 
                 this.addRangeValueStart();
                 if (this.rangeValueStart >= this.dataSize) {
-                    if (resultList.size() > 0) {
-                        this.synQueue.put(resultList);
-                    }
-
-                    this.synQueue.put(new LinkedList<>());
+                    dataBlockSynQueue.put("");
                     LOGGER.info("exit read data thread, data request completed");
                     return;
                 }

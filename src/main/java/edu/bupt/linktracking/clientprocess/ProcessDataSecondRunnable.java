@@ -5,23 +5,26 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
 
-public class ProcessDataRunnable implements Runnable {
+public class ProcessDataSecondRunnable implements Runnable {
 
     private final List<Map<String, List<String>>> ringCaches;
-    private final SynchronousQueue<List<String>> spanSynQueue = new SynchronousQueue<>();
-    private final SynchronousQueue<Set<String>> uploadSynQueue = new SynchronousQueue<>();
+    private final SynchronousQueue<List<String>> spansSynQueue;
+    private final SynchronousQueue<Set<String>> uploadSynQueue;
 
-    public ProcessDataRunnable(List<Map<String, List<String>>> ringCaches) {
+    private final Lock lockForRingCaches;
+    private final Condition conditionForRingCaches;
+
+    public final static Set<String> EXIT_FLAG_SET = new HashSet<>();
+
+    public ProcessDataSecondRunnable(List<Map<String, List<String>>> ringCaches, SynchronousQueue<List<String>> spansSynQueue, SynchronousQueue<Set<String>> uploadSynQueue, Lock lockForRingCaches, Condition conditionForRingCaches) {
         this.ringCaches = ringCaches;
-    }
-
-    public SynchronousQueue<List<String>> getSpanSynQueue() {
-        return spanSynQueue;
-    }
-
-    public SynchronousQueue<Set<String>> getUploadSynQueue() {
-        return uploadSynQueue;
+        this.spansSynQueue = spansSynQueue;
+        this.uploadSynQueue = uploadSynQueue;
+        this.lockForRingCaches = lockForRingCaches;
+        this.conditionForRingCaches = conditionForRingCaches;
     }
 
     @Override
@@ -38,10 +41,14 @@ public class ProcessDataRunnable implements Runnable {
 
         try {
             while (true) {
-                List<String> spans = spanSynQueue.take();
+                LOGGER.info("wait a spans");
+
+                List<String> spans = spansSynQueue.take();
 
                 if (spans.size() == 0) {
-                    break;
+                    uploadSynQueue.put(EXIT_FLAG_SET);
+                    LOGGER.info("exit process data thread 2");
+                    return;
                 }
 
                 LOGGER.info("start to process data block, batchPos: " + batchPos);
@@ -69,9 +76,22 @@ public class ProcessDataRunnable implements Runnable {
                 ++batchPos;
                 cachePos = ++cachePos == ringCacheSize ? 0 : cachePos;
                 currCache = ringCaches.get(cachePos);
-            }
 
-            LOGGER.info("exit process data thread");
+                if (currCache.size() > 0) {
+                    long startTime = System.currentTimeMillis();
+                    LOGGER.warn("cache conflict!");
+                    lockForRingCaches.lock();
+                    try {
+                        while (currCache.size() > 0) {
+                            conditionForRingCaches.await();
+                        }
+                    } finally {
+                        lockForRingCaches.unlock();
+                    }
+                    long endTime = System.currentTimeMillis();
+                    LOGGER.info("suc to clear cache, waiting time: " + (endTime - startTime));
+                }
+            }
         } catch (InterruptedException e) {
             e.printStackTrace();
         }

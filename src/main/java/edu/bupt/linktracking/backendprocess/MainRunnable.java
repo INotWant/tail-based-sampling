@@ -49,7 +49,7 @@ public class MainRunnable implements Runnable {
             if (Main.DATA_SOURCE_PORT == -1){
                 LOGGER.error("fail to get data source port");
             }else {
-                LOGGER.error("suc to get data source port: " + Main.DATA_SOURCE_PORT);
+                LOGGER.info("suc to get data source port: " + Main.DATA_SOURCE_PORT);
             }
 
             // start query span thread
@@ -129,7 +129,6 @@ public class MainRunnable implements Runnable {
         }
         for (Map.Entry<String, List<String>> entry : resultMap1.entrySet()) {
             String traceId = entry.getKey();
-            // TODO test
             Set<String> spanSet = new HashSet<>(entry.getValue());
             String spans = spanSet.stream().
                     sorted(Comparator.comparing(MainRunnable::getStartTime)).
@@ -151,7 +150,6 @@ public class MainRunnable implements Runnable {
 
     private static boolean sendCheckSum() {
         String path = String.format("http://localhost:%s/api/finished", Main.DATA_SOURCE_PORT);
-        // TODO test
         String param = "result=" + URLEncoder.encode(JSON.toJSONString(TRACE_CHUCKSUM_MAP));
         try {
             URL url = new URL(path);
